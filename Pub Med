@@ -1,0 +1,116 @@
+import requests
+import xml.etree.ElementTree as ET
+import csv
+import argparse
+
+# PubMed API Base URLs
+BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+SEARCH_URL = BASE_URL + "esearch.fcgi"
+FETCH_URL = BASE_URL + "efetch.fcgi"
+
+def fetch_pubmed_papers(query, max_results=10):
+    """Fetches papers from PubMed based on the query."""
+    params = {
+        "db": "pubmed",
+        "term": query,
+        "retmax": max_results,
+        "retmode": "xml"
+    }
+    
+    response = requests.get(SEARCH_URL, params=params)
+    if response.status_code != 200:
+        raise Exception(f"Error fetching PubMed IDs: {response.status_code}")
+
+    root = ET.fromstring(response.text)
+    pubmed_ids = [id_elem.text for id_elem in root.findall(".//Id")]
+
+    if not pubmed_ids:
+        print("No papers found for the given query.")
+        return []
+
+    # Fetch details of each PubMed ID
+    params = {
+        "db": "pubmed",
+        "id": ",".join(pubmed_ids),
+        "retmode": "xml"
+    }
+    
+    response = requests.get(FETCH_URL, params=params)
+    if response.status_code != 200:
+        raise Exception(f"Error fetching paper details: {response.status_code}")
+
+    root = ET.fromstring(response.text)
+    
+    papers = []
+    
+    for article in root.findall(".//PubmedArticle"):
+        pubmed_id = article.find(".//PMID").text
+        title = article.find(".//ArticleTitle").text if article.find(".//ArticleTitle") is not None else "N/A"
+        pub_date_elem = article.find(".//PubDate/Year")
+        publication_date = pub_date_elem.text if pub_date_elem is not None else "N/A"
+
+        authors = []
+        affiliations = []
+        corresponding_author_email = "N/A"
+        
+        for author in article.findall(".//Author"):
+            last_name = author.find("LastName")
+            first_name = author.find("ForeName")
+            full_name = f"{first_name.text} {last_name.text}" if first_name is not None and last_name is not None else "N/A"
+            
+            affiliation_elem = author.find(".//Affiliation")
+            affiliation = affiliation_elem.text if affiliation_elem is not None else "N/A"
+            
+            # Check for non-academic institutions (heuristic check)
+            if any(keyword in affiliation.lower() for keyword in ["pharma", "biotech", "inc.", "ltd.", "gmbh", "corp"]):
+                authors.append(full_name)
+                affiliations.append(affiliation)
+
+            # Extract corresponding author email (if available)
+            if "@" in affiliation:
+                corresponding_author_email = affiliation
+
+        # Store paper details only if at least one non-academic author is found
+        if authors:
+            papers.append({
+                "PubMedID": pubmed_id,
+                "Title": title,
+                "Publication Date": publication_date,
+                "Non-academic Author(s)": ", ".join(authors),
+                "Company Affiliation(s)": ", ".join(affiliations),
+                "Corresponding Author Email": corresponding_author_email
+            })
+    
+    return papers
+
+def save_to_csv(papers, filename):
+    """Saves the fetched papers to a CSV file."""
+    if not papers:
+        print("No results to save.")
+        return
+    
+    with open(filename, mode="w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=papers[0].keys())
+        writer.writeheader()
+        writer.writerows(papers)
+    
+    print(f"Results saved to {filename}")
+
+def main():
+    parser = argparse.ArgumentParser(description="Fetch research papers from PubMed based on a query.")
+    parser.add_argument("query", type=str, help="Search query for PubMed")
+    parser.add_argument("-o", "--output", type=str, help="Output CSV filename", default="pubmed_results.csv")
+    parser.add_argument("-n", "--num_results", type=int, help="Number of papers to fetch", default=10)
+    
+    args = parser.parse_args()
+    
+    print(f"Fetching papers for query: {args.query}...")
+    papers = fetch_pubmed_papers(args.query, args.num_results)
+    
+    if args.output:
+        save_to_csv(papers, args.output)
+    else:
+        print(papers)
+
+if __name__ == "__main__":
+    main()
